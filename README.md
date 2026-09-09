@@ -2,6 +2,8 @@
 
 一个用于上海交通大学**学生 IKEv2 VPN** 的轻量 Windows 桌面客户端。使用 Windows 内置 VPN 引擎和系统登录窗口，无需 aTrust 运行。
 
+SJTU aTrust的默认流量走向非常诡异，作为校外VPN，仍然保持了对诸如Bilibili、LOL、~~原神~~等域名的流量限制；并且并没有对一些关键的，例如IEEE、Matlab等需要在线验证的域名做流量规则。所以忍不了了和他爆了！
+
 个人开源项目，非校方产品。Windows 10/11 x64；运行依赖系统自带的 .NET Framework 和 Windows PowerShell 5.1。
 
 橙色图标基于 aTrust 图标调整配色，不表示本项目为 aTrust 官方客户端。(灵感来源于XIV Launcher Soil)
