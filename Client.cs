@@ -11,8 +11,9 @@ using System.Threading.Tasks;
 using System.Web.Script.Serialization;
 using System.Windows.Forms;
 
-[assembly: AssemblyVersion("1.0.1.0")]
-[assembly: AssemblyFileVersion("1.0.1.0")]
+[assembly: AssemblyVersion("1.0.2.0")]
+[assembly: AssemblyFileVersion("1.0.2.0")]
+[assembly: AssemblyInformationalVersion("1.0.2")]
 [assembly: AssemblyProduct("SJTU Link")]
 
 internal static class Program {
@@ -38,14 +39,15 @@ internal static class Program {
     internal static async Task<object> Call(object request) {
         string script;
         using (var reader = new StreamReader(Assembly.GetExecutingAssembly().GetManifestResourceStream("backend.ps1"))) script = reader.ReadToEnd();
+        const string bootstrap = "$wire=[Console]::In.ReadToEnd()|ConvertFrom-Json; $request=$wire.Request; & ([scriptblock]::Create([Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($wire.Script))))";
         var psi = new ProcessStartInfo(Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), @"WindowsPowerShell\v1.0\powershell.exe"),
-            "-NoLogo -NoProfile -NonInteractive -EncodedCommand " + Convert.ToBase64String(Encoding.Unicode.GetBytes(script))) {
+            "-NoLogo -NoProfile -NonInteractive -EncodedCommand " + Convert.ToBase64String(Encoding.Unicode.GetBytes(bootstrap))) {
             UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true, RedirectStandardOutput = true, RedirectStandardError = true,
             StandardOutputEncoding = Encoding.UTF8, StandardErrorEncoding = Encoding.UTF8
         };
         using (var process = Process.Start(psi)) {
             // Encode the payload to ASCII before writing: no locale-dependent credentials or shell interpolation.
-            var payload = Json.Serialize(request);
+            var payload = Json.Serialize(new { Script=Convert.ToBase64String(Encoding.UTF8.GetBytes(script)), Request=request });
             var escaped = new StringBuilder();
             foreach (char c in payload) { if (c > 127) escaped.Append("\\u" + ((int)c).ToString("x4")); else escaped.Append(c); }
             await process.StandardInput.WriteAsync(escaped.ToString()); process.StandardInput.Close();
@@ -76,7 +78,7 @@ internal sealed class Client : Form {
     string ConfigFile { get { return Path.Combine(Program.StateDirectory, "draft.json"); } }
 
     public Client(bool render) {
-        Text = "SJTU Link · 交大学生 VPN"; StartPosition = FormStartPosition.CenterScreen;
+        Text = "SJTU Link · v1.0.2 · 交大学生 VPN"; StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(1000, 750); MinimumSize = new Size(1016, 789);
         Font = new Font("Microsoft YaHei UI", 10F); BackColor = Color.FromArgb(243,246,248); ForeColor = ink;
         AutoScaleMode = AutoScaleMode.Dpi;
@@ -143,6 +145,7 @@ internal sealed class Client : Form {
         aboutTab.Controls.Add(help);
         ButtonAt(aboutTab,"删除本工具的 VPN 配置",26,467,270,() => Remove());
         ButtonAt(aboutTab,"学校官方配置说明",320,467,230,() => { Process.Start("https://net.sjtu.edu.cn/info/1200/3286.htm"); return Task.FromResult(0); });
+        ButtonAt(aboutTab,"恢复旧连接管理",575,467,230,() => RecoverManagement());
         if (!render) LoadDraft();
         server.SelectedIndexChanged += delegate { InvalidatePlan(); }; mode.SelectedIndexChanged += delegate { InvalidatePlan(); }; rules.TextChanged += delegate { InvalidatePlan(); };
         timer.Interval=12000; timer.Tick += async delegate { if (!busy && !refreshing) await RefreshStatus(); };
@@ -172,14 +175,15 @@ internal sealed class Client : Form {
     }
     async Task Apply() {
         if(plan==null) { await Preview(); MessageBox.Show(this,"预览已生成，请检查右侧路由，然后再次点击“应用配置”。",Text); return; }
+        if(!await EnsureManagement())return;
         await Program.Call(new { Action="apply",Plan=plan });
         draftNeedsApply=false;
         previewHint.Text="配置已应用并校验。可以登录并连接。"; await Save(); await RefreshStatus();
     }
     async Task Connect() {
-        if(draftNeedsApply) throw new Exception("规则草稿尚未应用。请先预览并应用配置，再登录连接。");
         var snapshot=(Dictionary<string,object>)await Program.Call(new { Action="status" });
         if (!(bool)snapshot["Exists"]) throw new Exception("请先预览并应用配置。");
+        if(draftNeedsApply && MessageBox.Show(this,"草稿尚未应用。是否按现有已生效的 VPN 配置登录？\r\n本次不会应用草稿；要使用新规则，请取消后点击“应用配置”。",Text,MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return;
         if(Convert.ToString(snapshot["Status"])=="Connected") { await RefreshStatus(); return; }
         // Explicit user phonebook prevents the default RAS phonebook preference choosing another entry.
         string pbk=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.ApplicationData),@"Microsoft\Network\Connections\Pbk\rasphone.pbk");
@@ -224,7 +228,18 @@ internal sealed class Client : Form {
         text.AppendLine(Convert.ToString(d["Notice"])); result.Text=text.ToString();
     }
     async Task Remove() {
+        if(!await EnsureManagement())return;
         if(MessageBox.Show(this,"删除本工具创建的 Windows VPN 连接和其中的路由？本地规则草稿会保留。",Text,MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return;
         await Program.Call(new { Action="remove" }); plan=null; routeList.Items.Clear(); await RefreshStatus();
     }
+    async Task<bool> EnsureManagement() {
+        var s=(Dictionary<string,object>)await Program.Call(new {Action="status"});
+        if(!(bool)s["Exists"] || Convert.ToString(s["Ownership"])=="matched")return true;
+        string reason=Convert.ToString(s["Ownership"]);
+        string explanation=reason=="missing"?"本地管理标记缺失":reason=="unreadable"?"本地管理标记无法读取":reason=="invalid"?"本地管理标记格式无效":"本地管理标记与连接不匹配";
+        if(MessageBox.Show(this,explanation+"。\r\n\r\n是否由本工具管理已有连接？\r\n"+Program.Profile+"\r\n服务器："+s["Server"]+"\r\n\r\n恢复仅保存管理记录，不重建连接、不重置认证或路由。随后才执行你选择的操作。",Text,MessageBoxButtons.YesNo,MessageBoxIcon.Question)!=DialogResult.Yes)return false;
+        await Program.Call(new {Action="restore-owner",ProfileId=s["ProfileId"],Server=s["Server"]});
+        return true;
+    }
+    async Task RecoverManagement() { if(await EnsureManagement()) { await RefreshStatus(); MessageBox.Show(this,"管理记录已就绪，可以应用配置。",Text); } }
 }

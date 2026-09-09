@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $profileName = 'SJTU Link - Student IKEv2'
-$ownerFile = Join-Path $env:LOCALAPPDATA 'SJTU-Link\profile-owner.txt'
+$ownerFile = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'SJTU-Link\profile-owner.txt'
 
 function Normalize-Prefix([string]$value) {
     $parts = $value.Trim().Split('/')
@@ -60,16 +60,50 @@ function Get-Plan($request) {
     [pscustomobject]@{ Server = $request.Server; Mode = $request.Mode; Routes = $routes; Details = $details; ResolvedAt = (Get-Date).ToString('s') }
 }
 
-function Get-OurProfile {
+function Get-Ownership($p) {
+    if (-not $p) { return 'absent' }
+    try {
+        $saved = [IO.File]::ReadAllText($ownerFile).Trim()
+    } catch [IO.FileNotFoundException] { return 'missing' }
+      catch [IO.DirectoryNotFoundException] { return 'missing' }
+      catch { return 'unreadable' }
+    $savedId = [guid]::Empty; $actualId = [guid]::Empty
+    if (-not [guid]::TryParse($saved,[ref]$savedId) -or -not [guid]::TryParse([string]$p.Guid,[ref]$actualId) -or $savedId -eq [guid]::Empty) { return 'invalid' }
+    if ($savedId -ne $actualId) { return 'mismatch' }
+    return 'matched'
+}
+
+function Save-Ownership($p) {
+    $id = [guid]::Empty
+    if (-not [guid]::TryParse([string]$p.Guid,[ref]$id) -or $id -eq [guid]::Empty) { throw '连接没有有效标识，不能记录归属。' }
+    [IO.Directory]::CreateDirectory((Split-Path $ownerFile)) | Out-Null
+    $temp = $ownerFile + '.' + [guid]::NewGuid().ToString('N') + '.tmp'
+    try {
+        [IO.File]::WriteAllText($temp,$id.ToString('D'))
+        if ([IO.File]::Exists($ownerFile)) { [IO.File]::Replace($temp,$ownerFile,$ownerFile+'.bak') }
+        else { [IO.File]::Move($temp,$ownerFile) }
+    } finally { if ([IO.File]::Exists($temp)) { [IO.File]::Delete($temp) } }
+}
+
+function Get-OurProfile([switch]$RequireOwnership) {
     # Enumeration failures must not be mistaken for an absent profile.
     $profiles = @(Get-VpnConnection -ErrorAction Stop)
     $p = $profiles | Where-Object Name -eq $profileName | Select-Object -First 1
-    if ($p -and (-not (Test-Path -LiteralPath $ownerFile) -or ([IO.File]::ReadAllText($ownerFile)).Trim() -ne [string]$p.Guid)) { throw '同名连接的归属无法确认，本工具不会修改它。请先在 Windows 设置中为它改名。' }
+    if ($p -and ($p.ServerAddress -notin @('stu.vpn.sjtu.edu.cn','stuv4.vpn.sjtu.edu.cn') -or [string]$p.TunnelType -ne 'Ikev2' -or @($p.AuthenticationMethod) -notcontains 'Eap')) { throw '同名连接不是支持的学生 IKEv2 / EAP 配置，不能接管或登录。' }
+    if ($p -and $RequireOwnership -and (Get-Ownership $p) -ne 'matched') { throw '旧连接的管理记录需要恢复，请点击“恢复旧连接管理”。无需删除或重建 VPN。' }
     return $p
 }
 
-function Apply-Plan($plan) {
+function Restore-Ownership($request) {
     $p = Get-OurProfile
+    if (-not $p -or [string]$p.Guid -ne [string]$request.ProfileId -or $p.ServerAddress -ne $request.Server) { throw '连接已发生变化，请刷新后重新确认。' }
+    Save-Ownership $p
+    if ((Get-Ownership $p) -ne 'matched') { throw '管理记录写入校验失败。' }
+    return '管理记录已恢复；原 VPN、认证设置和路由未修改。'
+}
+
+function Apply-Plan($plan) {
+    $p = Get-OurProfile -RequireOwnership
     if ($p -and $p.ConnectionStatus -ne 'Disconnected') { throw '请先断开本客户端 VPN，再应用配置。' }
     $oldRoutes = @()
     if ($p) { $oldRoutes = @($p.Routes | Select-Object DestinationPrefix, RouteMetric) }
@@ -80,8 +114,7 @@ function Apply-Plan($plan) {
             Add-VpnConnection -Name $profileName -ServerAddress $plan.Server -TunnelType Ikev2 -AuthenticationMethod Eap -EapConfigXmlStream $eap.EapConfigXmlStream -EncryptionLevel Required -SplitTunneling -DnsSuffix 'sjtu.edu.cn' -RememberCredential:$false -Force | Out-Null
             $created = $true
             $createdProfile = Get-VpnConnection -Name $profileName
-            [IO.Directory]::CreateDirectory((Split-Path $ownerFile)) | Out-Null
-            [IO.File]::WriteAllText($ownerFile, [string]$createdProfile.Guid)
+            Save-Ownership $createdProfile
         }
         Set-VpnConnection -Name $profileName -ServerAddress $plan.Server -SplitTunneling:($plan.Mode -eq 'split') -Force | Out-Null
         foreach ($route in $oldRoutes) {
@@ -90,7 +123,7 @@ function Apply-Plan($plan) {
         foreach ($prefix in $plan.Routes) {
             Add-VpnConnectionRoute -ConnectionName $profileName -DestinationPrefix $prefix -RouteMetric 1 | Out-Null
         }
-        $check = Get-OurProfile
+        $check = Get-OurProfile -RequireOwnership
         $actual = @($check.Routes | ForEach-Object { $_.DestinationPrefix } | Sort-Object -Unique)
         if ($check.ServerAddress -ne $plan.Server -or $check.SplitTunneling -ne ($plan.Mode -eq 'split') -or @(Compare-Object $actual @($plan.Routes)).Count -gt 0) { throw '写入后的配置校验不一致。' }
     } catch {
@@ -102,7 +135,7 @@ function Apply-Plan($plan) {
             }
             elseif ($p) {
                 Set-VpnConnection -Name $profileName -ServerAddress $p.ServerAddress -SplitTunneling:$p.SplitTunneling -Force | Out-Null
-                $current = Get-OurProfile
+                $current = Get-OurProfile -RequireOwnership
                 foreach ($route in @($current.Routes)) { Remove-VpnConnectionRoute -ConnectionName $profileName -DestinationPrefix $route.DestinationPrefix -Confirm:$false | Out-Null }
                 foreach ($route in $oldRoutes) { Add-VpnConnectionRoute -ConnectionName $profileName -DestinationPrefix $route.DestinationPrefix -RouteMetric $route.RouteMetric | Out-Null }
             }
@@ -116,11 +149,13 @@ function Get-Status {
     $p = Get-OurProfile
     $proxy = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
     $warnings = @()
+    $ownership = Get-Ownership $p
+    if ($p -and $ownership -ne 'matched') { $warnings += '管理记录需恢复；应用配置时会提示确认。旧连接仍可登录。' }
     if ($proxy.ProxyEnable -eq 1) { $warnings += "系统代理已开启：$($proxy.ProxyServer)。浏览器可能先走代理，目标分流不能决定代理软件的出口。" }
     if ($proxy.AutoConfigURL) { $warnings += '系统启用了自动代理脚本，实际出口也受脚本影响。' }
     $adapters = @([Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object { $_.OperationalStatus -eq 'Up' -and ($_.Name -match 'aTrust' -or $_.Description -match 'aTrust|Sangfor') })
     if ($adapters.Count -gt 0) { $warnings += 'aTrust 隧道网卡仍在线；请先在原客户端注销，以免两条 VPN 的路由相互影响。' }
-    [pscustomobject]@{ Exists = [bool]$p; Status = $(if ($p) { [string]$p.ConnectionStatus } else { 'NotConfigured' }); Server = $(if ($p) { $p.ServerAddress } else { '' }); Split = $(if ($p) { $p.SplitTunneling } else { $true }); Routes = @($p.Routes | Where-Object { $_ } | Select-Object DestinationPrefix, RouteMetric); Warnings = $warnings }
+    [pscustomobject]@{ Exists = [bool]$p; Status = $(if ($p) { [string]$p.ConnectionStatus } else { 'NotConfigured' }); Server = $(if ($p) { $p.ServerAddress } else { '' }); Split = $(if ($p) { $p.SplitTunneling } else { $true }); Routes = @($p.Routes | Where-Object { $_ } | Select-Object DestinationPrefix, RouteMetric); Warnings = $warnings; Ownership = $ownership; ProfileId = $(if ($p) { [string]$p.Guid } else { '' }) }
 }
 
 function Invoke-Request($request) {
@@ -135,8 +170,9 @@ function Invoke-Request($request) {
             Apply-Plan $plan
         }
         'status' { Get-Status }
+        'restore-owner' { Restore-Ownership $request }
         'remove' {
-            $p = Get-OurProfile
+            $p = Get-OurProfile -RequireOwnership
             if ($p -and $p.ConnectionStatus -ne 'Disconnected') { throw '请先断开 VPN。' }
             if ($p) {
                 Remove-VpnConnection -Name $profileName -Force | Out-Null
@@ -162,7 +198,7 @@ function Invoke-Request($request) {
 
 if ($env:SJTU_LINK_TEST -ne '1') {
     try {
-        $request = [Console]::In.ReadToEnd() | ConvertFrom-Json
+        if ($null -eq $request) { $request = [Console]::In.ReadToEnd() | ConvertFrom-Json }
         $result = Invoke-Request $request
         @{ Ok = $true; Data = $result } | ConvertTo-Json -Depth 14 -Compress
     } catch {

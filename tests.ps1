@@ -35,7 +35,7 @@ function New-EapConfiguration { param([switch]$Peap,[switch]$VerifyServerIdentit
 function Add-VpnConnection {
     param($Name,$ServerAddress,$TunnelType,$AuthenticationMethod,$EapConfigXmlStream,$EncryptionLevel,[switch]$SplitTunneling,$DnsSuffix,$RememberCredential,[switch]$Force)
     $script:writes++
-    $script:state = [pscustomobject]@{ Name=$Name; ServerAddress=$ServerAddress; Guid='test-guid'; DnsSuffix=$DnsSuffix; ConnectionStatus='Disconnected'; SplitTunneling=$true; Routes=@() }
+    $script:state = [pscustomobject]@{ Name=$Name; ServerAddress=$ServerAddress; Guid='{11111111-2222-3333-4444-555555555555}'; TunnelType='Ikev2'; AuthenticationMethod=@('Eap'); DnsSuffix=$DnsSuffix; ConnectionStatus='Disconnected'; SplitTunneling=$true; Routes=@() }
 }
 function Set-VpnConnection { param($Name,$ServerAddress,$SplitTunneling,[switch]$Force); $script:writes++; $script:state.ServerAddress=$ServerAddress; $script:state.SplitTunneling=$SplitTunneling }
 function Add-VpnConnectionRoute {
@@ -62,7 +62,27 @@ try {
     [IO.File]::WriteAllText($ownerFile,'another-guid'); $writesBefore=$script:writes
     Reject { Apply-Plan $full } 'Reject profile ownership mismatch'
     Assert ($script:writes -eq $writesBefore) 'Foreign profile left untouched'
-    [IO.File]::WriteAllText($ownerFile,'test-guid')
+    Assert ((Get-Ownership $script:state) -eq 'invalid') 'Diagnose malformed marker'
+    [IO.File]::Delete($ownerFile)
+    Assert ((Get-Ownership $script:state) -eq 'missing') 'Diagnose missing marker'
+    Assert ($null -ne (Get-OurProfile)) 'Existing school profile remains readable without a marker'
+    Reject { Invoke-Request @{Action='restore-owner'; ProfileId='changed';Server=$script:state.ServerAddress} } 'Reject recovery when profile changed since preview'
+    $snapshot=$script:state | ConvertTo-Json -Depth 8 -Compress
+    $writesBefore=$script:writes
+    Invoke-Request @{Action='restore-owner';ProfileId=$script:state.Guid;Server=$script:state.ServerAddress} | Out-Null
+    Assert ((Get-Ownership $script:state) -eq 'matched') 'Recover missing ownership record'
+    Assert ($script:writes -eq $writesBefore -and ($script:state | ConvertTo-Json -Depth 8 -Compress) -eq $snapshot) 'Recovery does not mutate VPN settings'
+    Apply-Plan $full | Out-Null
+    Assert (-not $script:state.SplitTunneling) 'Recovered profile can apply configuration'
+    [IO.File]::WriteAllText($ownerFile,'{99999999-2222-3333-4444-555555555555}')
+    Assert ((Get-Ownership $script:state) -eq 'mismatch') 'Diagnose genuine GUID mismatch'
+    Invoke-Request @{Action='restore-owner';ProfileId=$script:state.Guid;Server=$script:state.ServerAddress} | Out-Null
+    Assert ((Get-Ownership $script:state) -eq 'matched' -and [IO.File]::Exists($ownerFile+'.bak')) 'Recover stale record and preserve previous marker'
+    $script:state.ServerAddress='example.invalid'
+    Reject { Invoke-Request @{Action='restore-owner';ProfileId=$script:state.Guid;Server=$script:state.ServerAddress} } 'Do not take over foreign endpoint'
+    $script:state.ServerAddress='stu.vpn.sjtu.edu.cn'
+    [IO.File]::WriteAllText($ownerFile,'11111111-2222-3333-4444-555555555555')
+    Assert ((Get-Ownership $script:state) -eq 'matched') 'Match equivalent GUID formatting'
     $script:denyRead=$true; $writesBefore=$script:writes
     Reject { Apply-Plan $full } 'Read failure is not treated as missing connection'
     Assert ($script:writes -eq $writesBefore) 'Read failure causes no network writes'
