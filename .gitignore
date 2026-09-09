@@ -1,0 +1,16 @@
+# Publish only reviewed source and documentation. Runtime data is never tracked.
+/*
+!/.gitignore
+!/Client.cs
+!/backend.ps1
+!/app.manifest
+!/build.ps1
+!/tests.ps1
+!/Smoke.cs
+!/UiSmoke.cs
+!/test-ui.ps1
+!/README.md
+!/LICENSE
+!/CHANGELOG.md
+!/PRIVACY.md
+!/使用说明.txt
