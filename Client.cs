@@ -78,6 +78,7 @@ internal sealed class Client : Form {
     string ConfigFile { get { return Path.Combine(Program.StateDirectory, "draft.json"); } }
 
     public Client(bool render) {
+        Icon = Icon.ExtractAssociatedIcon(Application.ExecutablePath);
         Text = "SJTU Link · v1.0.2 · 交大学生 VPN"; StartPosition = FormStartPosition.CenterScreen;
         ClientSize = new Size(1000, 750); MinimumSize = new Size(1016, 789);
         Font = new Font("Microsoft YaHei UI", 10F); BackColor = Color.FromArgb(243,246,248); ForeColor = ink;
