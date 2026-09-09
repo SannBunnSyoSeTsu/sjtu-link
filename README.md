@@ -4,7 +4,7 @@
 
 个人开源项目，非校方产品。Windows 10/11 x64；运行依赖系统自带的 .NET Framework 和 Windows PowerShell 5.1。
 
-橙色图标基于 aTrust 图标调整配色，不表示本项目为 aTrust 官方客户端。
+橙色图标基于 aTrust 图标调整配色，不表示本项目为 aTrust 官方客户端。(灵感来源于XIV Launcher Soil)
 
 ## 功能
 
