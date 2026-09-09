@@ -35,7 +35,7 @@ function New-EapConfiguration { param([switch]$Peap,[switch]$VerifyServerIdentit
 function Add-VpnConnection {
     param($Name,$ServerAddress,$TunnelType,$AuthenticationMethod,$EapConfigXmlStream,$EncryptionLevel,[switch]$SplitTunneling,$DnsSuffix,$RememberCredential,[switch]$Force)
     $script:writes++
-    $script:state = [pscustomobject]@{ Name=$Name; ServerAddress=$ServerAddress; Guid='test-guid'; DnsSuffix=$DnsSuffix; ConnectionStatus='Disconnected'; SplitTunneling=$true; Routes=@() }
+    $script:state = [pscustomobject]@{ Name=$Name; ServerAddress=$ServerAddress; TunnelType='Ikev2'; Guid='{11111111-2222-3333-4444-555555555555}'; DnsSuffix=$DnsSuffix; ConnectionStatus='Disconnected'; SplitTunneling=$true; Routes=@() }
 }
 function Set-VpnConnection { param($Name,$ServerAddress,$SplitTunneling,[switch]$Force); $script:writes++; $script:state.ServerAddress=$ServerAddress; $script:state.SplitTunneling=$SplitTunneling }
 function Add-VpnConnectionRoute {
@@ -62,7 +62,23 @@ try {
     [IO.File]::WriteAllText($ownerFile,'another-guid'); $writesBefore=$script:writes
     Reject { Apply-Plan $full } 'Reject profile ownership mismatch'
     Assert ($script:writes -eq $writesBefore) 'Foreign profile left untouched'
-    [IO.File]::WriteAllText($ownerFile,'test-guid')
+    Assert ($null -ne (Get-OurProfile)) 'Allow read-only login status for existing school profile without matching marker'
+    $beforeRead = $script:state | ConvertTo-Json -Depth 8 -Compress
+    [IO.File]::Delete($ownerFile)
+    Assert ($null -ne (Get-OurProfile)) 'Allow read-only status when ownership file is missing'
+    Assert (($script:state | ConvertTo-Json -Depth 8 -Compress) -eq $beforeRead -and -not (Test-Path -LiteralPath $ownerFile)) 'Read-only access changes neither profile nor marker'
+    Reject { Invoke-Request @{ Action='remove' } } 'Missing marker still protects removal'
+    [IO.File]::WriteAllText($ownerFile,'11111111-2222-3333-4444-555555555555')
+    Assert (Test-ProfileOwnership $script:state) 'Normalize equivalent GUIDs with or without braces'
+    [IO.File]::WriteAllText($ownerFile,'not-a-guid')
+    Assert (-not (Test-ProfileOwnership $script:state)) 'Malformed marker cannot claim ownership'
+    [IO.File]::WriteAllText($ownerFile,'11111111-2222-3333-4444-555555555555')
+    $script:state.ServerAddress='example.invalid'
+    Reject { Get-OurProfile } 'Do not allow login to a foreign endpoint'
+    $script:state.ServerAddress='stu.vpn.sjtu.edu.cn'
+    $script:state.TunnelType='Pptp'
+    Reject { Get-OurProfile } 'Do not allow login using an unexpected tunnel protocol'
+    $script:state.TunnelType='Ikev2'
     $script:denyRead=$true; $writesBefore=$script:writes
     Reject { Apply-Plan $full } 'Read failure is not treated as missing connection'
     Assert ($script:writes -eq $writesBefore) 'Read failure causes no network writes'
