@@ -2,7 +2,7 @@ $ErrorActionPreference = 'Stop'
 $ProgressPreference = 'SilentlyContinue'
 [Console]::OutputEncoding = New-Object System.Text.UTF8Encoding($false)
 $profileName = 'SJTU Link - Student IKEv2'
-$ownerFile = Join-Path ([Environment]::GetFolderPath('LocalApplicationData')) 'SJTU-Link\profile-owner.txt'
+$ownerFile = Join-Path $env:LOCALAPPDATA 'SJTU-Link\profile-owner.txt'
 
 function Normalize-Prefix([string]$value) {
     $parts = $value.Trim().Split('/')
@@ -60,27 +60,16 @@ function Get-Plan($request) {
     [pscustomobject]@{ Server = $request.Server; Mode = $request.Mode; Routes = $routes; Details = $details; ResolvedAt = (Get-Date).ToString('s') }
 }
 
-function Test-ProfileOwnership($p) {
-    if (-not $p -or -not (Test-Path -LiteralPath $ownerFile)) { return $false }
-    $savedId = [guid]::Empty
-    $actualId = [guid]::Empty
-    try {
-        $saved = [IO.File]::ReadAllText($ownerFile).Trim()
-        return ([guid]::TryParse($saved, [ref]$savedId) -and [guid]::TryParse([string]$p.Guid, [ref]$actualId) -and $savedId -ne [guid]::Empty -and $savedId -eq $actualId)
-    } catch { return $false }
-}
-
-function Get-OurProfile([switch]$RequireOwnership) {
+function Get-OurProfile {
     # Enumeration failures must not be mistaken for an absent profile.
     $profiles = @(Get-VpnConnection -ErrorAction Stop)
     $p = $profiles | Where-Object Name -eq $profileName | Select-Object -First 1
-    if ($p -and ($p.ServerAddress -notin @('stu.vpn.sjtu.edu.cn','stuv4.vpn.sjtu.edu.cn') -or [string]$p.TunnelType -ne 'Ikev2')) { throw '同名连接不是交大学生 IKEv2 配置，不能使用本客户端登录或修改。' }
-    if ($p -and $RequireOwnership -and -not (Test-ProfileOwnership $p)) { throw '这条连接可以登录，但缺少匹配的管理标记，暂不能修改或删除。请保留现有连接及本地配置标记。' }
+    if ($p -and (-not (Test-Path -LiteralPath $ownerFile) -or ([IO.File]::ReadAllText($ownerFile)).Trim() -ne [string]$p.Guid)) { throw '同名连接的归属无法确认，本工具不会修改它。请先在 Windows 设置中为它改名。' }
     return $p
 }
 
 function Apply-Plan($plan) {
-    $p = Get-OurProfile -RequireOwnership
+    $p = Get-OurProfile
     if ($p -and $p.ConnectionStatus -ne 'Disconnected') { throw '请先断开本客户端 VPN，再应用配置。' }
     $oldRoutes = @()
     if ($p) { $oldRoutes = @($p.Routes | Select-Object DestinationPrefix, RouteMetric) }
@@ -101,7 +90,7 @@ function Apply-Plan($plan) {
         foreach ($prefix in $plan.Routes) {
             Add-VpnConnectionRoute -ConnectionName $profileName -DestinationPrefix $prefix -RouteMetric 1 | Out-Null
         }
-        $check = Get-OurProfile -RequireOwnership
+        $check = Get-OurProfile
         $actual = @($check.Routes | ForEach-Object { $_.DestinationPrefix } | Sort-Object -Unique)
         if ($check.ServerAddress -ne $plan.Server -or $check.SplitTunneling -ne ($plan.Mode -eq 'split') -or @(Compare-Object $actual @($plan.Routes)).Count -gt 0) { throw '写入后的配置校验不一致。' }
     } catch {
@@ -113,7 +102,7 @@ function Apply-Plan($plan) {
             }
             elseif ($p) {
                 Set-VpnConnection -Name $profileName -ServerAddress $p.ServerAddress -SplitTunneling:$p.SplitTunneling -Force | Out-Null
-                $current = Get-OurProfile -RequireOwnership
+                $current = Get-OurProfile
                 foreach ($route in @($current.Routes)) { Remove-VpnConnectionRoute -ConnectionName $profileName -DestinationPrefix $route.DestinationPrefix -Confirm:$false | Out-Null }
                 foreach ($route in $oldRoutes) { Add-VpnConnectionRoute -ConnectionName $profileName -DestinationPrefix $route.DestinationPrefix -RouteMetric $route.RouteMetric | Out-Null }
             }
@@ -127,7 +116,6 @@ function Get-Status {
     $p = Get-OurProfile
     $proxy = Get-ItemProperty -LiteralPath 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings'
     $warnings = @()
-    if ($p -and -not (Test-ProfileOwnership $p)) { $warnings += '旧连接可登录；管理标记未匹配，暂不能修改或删除配置。' }
     if ($proxy.ProxyEnable -eq 1) { $warnings += "系统代理已开启：$($proxy.ProxyServer)。浏览器可能先走代理，目标分流不能决定代理软件的出口。" }
     if ($proxy.AutoConfigURL) { $warnings += '系统启用了自动代理脚本，实际出口也受脚本影响。' }
     $adapters = @([Net.NetworkInformation.NetworkInterface]::GetAllNetworkInterfaces() | Where-Object { $_.OperationalStatus -eq 'Up' -and ($_.Name -match 'aTrust' -or $_.Description -match 'aTrust|Sangfor') })
@@ -148,7 +136,7 @@ function Invoke-Request($request) {
         }
         'status' { Get-Status }
         'remove' {
-            $p = Get-OurProfile -RequireOwnership
+            $p = Get-OurProfile
             if ($p -and $p.ConnectionStatus -ne 'Disconnected') { throw '请先断开 VPN。' }
             if ($p) {
                 Remove-VpnConnection -Name $profileName -Force | Out-Null
